@@ -69,8 +69,9 @@ class ProgressReader:
 
 
 class Uploader:
-    def __init__(self, session):
+    def __init__(self, session, attempts=ATTEMPTS):
         self.session = session
+        self.attempts = attempts
 
     def request(self, method, url, **kwargs):
         try:
@@ -93,14 +94,14 @@ class Uploader:
             raise UploadError("HTTP transport failure") from None
 
     def retry(self, operation):
-        for attempt in range(ATTEMPTS):
+        for attempt in range(self.attempts):
             try:
                 return operation()
             except TransientError:
-                if attempt == ATTEMPTS - 1:
+                if attempt == self.attempts - 1:
                     raise UploadError("Transient failures exhausted retry budget") from None
-                delay = min(10 * 2 ** attempt, 60)
-                print(f"Transient failure; retry {attempt + 2}/{ATTEMPTS} in {delay}s",
+                delay = min(10 * 2 ** min(attempt, 3), 60)
+                print(f"Transient failure; retry {attempt + 2}/{self.attempts} in {delay}s",
                       file=sys.stderr)
                 time.sleep(delay)
 
@@ -149,10 +150,22 @@ class Uploader:
         self.retry(attempt)
 
 
+def positive_integer(value):
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a positive integer") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("draft_id", help="Existing unpublished Zenodo draft ID")
     parser.add_argument("files", nargs="+", type=Path)
+    parser.add_argument("--attempts", type=positive_integer, default=ATTEMPTS,
+                        help="Maximum attempts per operation, including the first (default: 5)")
     args = parser.parse_args(argv)
     token = os.environ.get("ZENODO_TOKEN")
     if not token:
@@ -167,7 +180,7 @@ def main(argv=None):
             raise UploadError("All inputs must be readable regular files")
         with requests.Session() as session:
             session.headers["Authorization"] = f"Bearer {token}"
-            uploader = Uploader(session)
+            uploader = Uploader(session, attempts=args.attempts)
             uploader.draft(args.draft_id)
             local = [(p, *fingerprint(p)) for p in args.files]
             # Check all existing targets before making any changes.

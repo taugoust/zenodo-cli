@@ -150,6 +150,43 @@ class Tests(unittest.TestCase):
             self.assertEqual(z.main(["123", str(self.path)]), 1)
         self.assertNotIn("sensitive-token", output.getvalue())
 
+    def test_custom_attempts(self):
+        self.uploader = z.Uploader(self.session, attempts=7)
+        self.serve([response(503) for _ in range(7)])
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), self.assertRaises(z.UploadError):
+            self.upload()
+        self.assertEqual(len(self.bodies), 7)
+        self.assertEqual([c.args[0] for c in self.sleep.call_args_list],
+                         [10, 20, 40, 60, 60, 60])
+        self.assertIn("retry 7/7", output.getvalue())
+
+    def test_one_attempt_no_retry(self):
+        self.uploader = z.Uploader(self.session, attempts=1)
+        self.serve([response(503)])
+        with self.assertRaises(z.UploadError):
+            self.upload()
+        self.assertEqual(len(self.bodies), 1)
+        self.sleep.assert_not_called()
+
+    def test_attempts_cli(self):
+        with patch.dict(os.environ, {"ZENODO_TOKEN": "test"}), \
+             patch.object(z, "Uploader") as uploader:
+            uploader.return_value.draft.return_value = ("bucket", [])
+            self.assertEqual(z.main(["--attempts", "10", "123", str(self.path)]), 0)
+            self.assertEqual(uploader.call_args.kwargs["attempts"], 10)
+            self.assertEqual(z.main(["123", str(self.path)]), 0)
+            self.assertEqual(uploader.call_args.kwargs["attempts"], 5)
+
+    def test_invalid_attempts(self):
+        for value in ("0", "-1", "1.5", "abc"):
+            with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()), \
+                 patch.object(z.requests, "Session") as session, \
+                 self.assertRaises(SystemExit) as error:
+                z.main(["--attempts", value, "123", str(self.path)])
+            self.assertEqual(error.exception.code, 2)
+            session.assert_not_called()
+
     def test_multiple_files_sequential(self):
         other = self.path.with_name("second.tar.gz")
         other.write_bytes(PAYLOAD)
