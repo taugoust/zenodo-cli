@@ -130,6 +130,30 @@ class Tests(unittest.TestCase):
             with self.assertRaises(z.UploadError):
                 self.uploader.draft("123")
 
+    def test_nested_retry_messages_identify_operation(self):
+        self.session.request.side_effect = [
+            response(body=DRAFT), response(503),
+            response(503), response(503),
+            response(body={**DRAFT, "files": [{"filename": self.path.name, **META}]}),
+        ]
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            self.upload()
+        log = output.getvalue()
+        self.assertIn(f"Upload {self.path.name}: transient failure; retry 2/5", log)
+        self.assertIn("Draft API check: transient failure; retry 2/5", log)
+        self.assertIn("Draft API check: transient failure; retry 3/5", log)
+
+    def test_exhaustion_identifies_operation(self):
+        self.uploader = z.Uploader(self.session, attempts=1)
+        self.session.request.return_value = response(503)
+        with self.assertRaisesRegex(z.UploadError, "Draft API check: transient failures exhausted 1 attempts"):
+            self.uploader.draft("123")
+        self.serve([response(503)])
+        with self.assertRaises(z.UploadError) as error:
+            self.upload()
+        self.assertIn(f"Upload {self.path.name}:", str(error.exception))
+
     def test_get_retries_and_invalid_json(self):
         self.session.request.side_effect = [response(429), response(body=DRAFT)]
         self.uploader.draft("123")

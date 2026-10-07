@@ -93,20 +93,23 @@ class Uploader:
         except requests.RequestException:
             raise UploadError("HTTP transport failure") from None
 
-    def retry(self, operation):
+    def retry(self, operation, label):
         for attempt in range(self.attempts):
             try:
                 return operation()
             except TransientError:
                 if attempt == self.attempts - 1:
-                    raise UploadError("Transient failures exhausted retry budget") from None
+                    raise UploadError(f"{label}: transient failures exhausted {self.attempts} attempts") from None
                 delay = min(10 * 2 ** min(attempt, 3), 60)
-                print(f"Transient failure; retry {attempt + 2}/{self.attempts} in {delay}s",
+                print(f"{label}: transient failure; retry {attempt + 2}/{self.attempts} in {delay}s",
                       file=sys.stderr)
                 time.sleep(delay)
 
     def draft(self, draft_id):
-        data = self.retry(lambda: self.request("GET", f"{API}/deposit/depositions/{draft_id}"))
+        data = self.retry(
+            lambda: self.request("GET", f"{API}/deposit/depositions/{draft_id}"),
+            label="Draft API check",
+        )
         if not isinstance(data, dict) or data.get("submitted") is not False:
             raise UploadError("Not a confirmed unpublished draft")
         bucket = data.get("links", {}).get("bucket")
@@ -147,7 +150,7 @@ class Uploader:
                     raise UploadError("Local file changed during upload")
             verify(result, size, digest)
             print(f"Verified upload: {path.name} ({size} bytes, MD5 {digest})")
-        self.retry(attempt)
+        self.retry(attempt, label=f"Upload {path.name}")
 
 
 def positive_integer(value):
