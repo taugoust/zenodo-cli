@@ -540,6 +540,22 @@ class NewVersionTests(FakeZenodoTests):
         self.assertEqual([f["filename"] for f in self.zenodo.files], ["old.tar.gz", "missing.tar.gz"])
         self.assertEqual(self.zenodo.rdm["metadata"]["version"], "1.1")
         self.assertIn("https://zenodo.org/uploads/456", log)
+        summary = log[log.index("Draft 456 has 2 files:"):].splitlines()[1:3]
+        self.assertEqual(summary, [f"  {'old.tar.gz':<14}  {'3 B':>18}  {'a' * 32}",
+                                   f"  {'missing.tar.gz':<14}  {'16 B':>18}  {MD5}"])
+        self.assertLess(log.index("Draft 456 has 2 files:"), log.index("Draft ready for review"))
+
+    def test_summary_tolerates_incomplete_entries(self):
+        self.zenodo.files = [{"filename": "a", "filesize": 1234567, "checksum": "c" * 32},
+                             {"filename": "pending-file.bin"}, {"filename": "b", "filesize": "7"}]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.uploader.summarize("456")
+        self.assertEqual(output.getvalue().splitlines(), [
+            "Draft 456 has 3 files:",
+            f"  {'a':<16}  {'1,234,567 B':>18}  {'c' * 32}",
+            f"  {'pending-file.bin':<16}  {'unknown size':>18}  no checksum",
+            f"  {'b':<16}  {'unknown size':>18}  no checksum"])
 
     def test_rerun_resumes_without_duplicating(self):
         self.assertEqual(self.run_cli("new-version", "123", str(self.path), "--version", "1.1")[0], 0)

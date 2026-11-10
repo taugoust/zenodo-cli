@@ -203,6 +203,18 @@ class Uploader:
         for p, size, digest in local:
             self.upload(draft_id, p, size, digest, replace=replace)
 
+    def summarize(self, draft_id):
+        """Print the draft's current files, to compare against before publishing."""
+        _, files = self.draft(draft_id)
+        print(f"Draft {draft_id} has {len(files)} files:")
+        width = max((len(f["filename"]) for f in files), default=0)
+        for f in files:
+            size = f.get("size", f.get("filesize"))
+            size = f"{size:,} B" if type(size) is int else "unknown size"
+            checksum = f.get("checksum")
+            checksum = checksum if isinstance(checksum, str) else "no checksum"
+            print(f"  {f['filename']:<{width}}  {size:>18}  {checksum}")
+
     def new_version(self, record_id):
         """Return the draft for a new version of a published record, creating it if needed."""
         record_id = check_id(record_id, "Record ID")

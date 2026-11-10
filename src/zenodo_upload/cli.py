@@ -70,6 +70,7 @@ def main(argv=None):
                     uploader.set_version(draft_id, args.version_label)
             if args.files:
                 uploader.upload_files(draft_id, args.files, replace=args.replace)
+            uploader.summarize(draft_id)
             if args.command == "new-version":
                 print(f"Draft ready for review; publish it at https://{urlsplit(api).netloc}/uploads/{draft_id}")
     except UploadError as error:

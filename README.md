@@ -42,7 +42,8 @@ nix run . -- new-version 12345678 missing-part.tar.gz --version 1.1
 
 The ID is that of any published version of the record. This creates a new-version draft and copies
 the previous version's files into it, sets the version metadata if `--version` is given, and
-uploads the named files. It then prints the draft's URL: check the draft there and publish it.
+uploads the named files. It then lists the draft's files with their sizes and MD5 checksums, and
+prints the draft's URL: check the draft there and publish it.
 
 Running the command again resumes the same draft instead of creating another. Files are only
 copied into a draft that has none, and `--no-import` skips copying entirely. Other metadata is left
