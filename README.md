@@ -44,13 +44,28 @@ Failures return a nonzero exit status. Files uploaded earlier stay in the draft,
 
 ## Development
 
-Python, `requests`, and `tqdm` come from the pinned Nix environment.
+The code is a small Python package: the upload logic lives in `src/zenodo_upload/uploader.py` and the command-line interface in `src/zenodo_upload/cli.py`. Python, `requests`, and `tqdm` come from the pinned Nix environment, which puts `src/` on `PYTHONPATH`.
 
 ```sh
-nix develop . --command python zenodo_upload.py 12345678 first.tar.gz second.tar.gz
+nix develop . --command python -m zenodo_upload 12345678 first.tar.gz second.tar.gz
 ```
 
-Run the mock tests with:
+You can also use it as a library:
+
+```python
+import requests
+from zenodo_upload import Uploader
+
+with requests.Session() as session:
+    session.headers["Authorization"] = f"Bearer {token}"
+    Uploader(session).upload_files("12345678", ["first.tar.gz", "second.tar.gz"])
+```
+
+`upload_files` runs the same checks as the command: it validates the inputs and draft ID, and checks every file already in the draft before uploading anything.
+
+The package is defined in `pyproject.toml`, so it also installs with `pip install .`, which provides the `zenodo-upload` command.
+
+The mock tests are in `tests/`. Run them with:
 
 ```sh
 nix flake check . -L

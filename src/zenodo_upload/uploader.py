@@ -1,7 +1,5 @@
 """Sequential, verified draft uploads; inspired by Pranav Durai's Zenodo #2514 comment."""
-import argparse
 import hashlib
-import os
 from pathlib import Path
 import re
 import sys
@@ -106,13 +104,17 @@ class Uploader:
                 time.sleep(delay)
 
     def draft(self, draft_id):
+        # The ID is interpolated into the API path, so reject anything but digits.
+        if not re.fullmatch(r"[1-9][0-9]*", str(draft_id)):
+            raise UploadError("Draft ID must be a positive integer")
         data = self.retry(
             lambda: self.request("GET", f"{API}/deposit/depositions/{draft_id}"),
             label="Draft API check",
         )
         if not isinstance(data, dict) or data.get("submitted") is not False:
             raise UploadError("Not a confirmed unpublished draft")
-        bucket = data.get("links", {}).get("bucket")
+        links = data.get("links")
+        bucket = links.get("bucket") if isinstance(links, dict) else None
         if not isinstance(bucket, str):
             raise UploadError("Missing bucket URL")
         parsed = urlsplit(bucket)
@@ -153,58 +155,19 @@ class Uploader:
         self.retry(attempt, label=f"Upload {path.name}")
 
 
-def positive_integer(value):
-    try:
-        number = int(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError("must be a positive integer") from None
-    if number < 1:
-        raise argparse.ArgumentTypeError("must be a positive integer")
-    return number
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("draft_id", help="Existing unpublished Zenodo draft ID")
-    parser.add_argument("files", nargs="+", type=Path)
-    parser.add_argument("--attempts", type=positive_integer, default=ATTEMPTS,
-                        help="Maximum attempts per operation, including the first (default: 5)")
-    args = parser.parse_args(argv)
-    token = os.environ.get("ZENODO_TOKEN")
-    if not token:
-        print("ZENODO_TOKEN must be set", file=sys.stderr)
-        return 1
-    try:
-        if not re.fullmatch(r"[1-9][0-9]*", args.draft_id):
-            raise UploadError("Draft ID must be a positive integer")
-        if len({p.name for p in args.files}) != len(args.files):
+    def upload_files(self, draft_id, paths):
+        """Upload files sequentially, checking every existing target before changing anything."""
+        paths = [Path(p) for p in paths]
+        if len({p.name for p in paths}) != len(paths):
             raise UploadError("Duplicate input basenames")
-        if any(not p.is_file() for p in args.files):
+        if any(not p.is_file() for p in paths):
             raise UploadError("All inputs must be readable regular files")
-        with requests.Session() as session:
-            session.headers["Authorization"] = f"Bearer {token}"
-            uploader = Uploader(session, attempts=args.attempts)
-            uploader.draft(args.draft_id)
-            local = [(p, *fingerprint(p)) for p in args.files]
-            # Check all existing targets before making any changes.
-            _, remote = uploader.draft(args.draft_id)
-            for p, size, digest in local:
-                for item in remote:
-                    if isinstance(item, dict) and item.get("filename") == p.name:
-                        verify(item, size, digest)
-            for p, size, digest in local:
-                uploader.upload(args.draft_id, p, size, digest)
-    except UploadError as error:
-        print(f"Error: {error}".replace(token, "[REDACTED]"), file=sys.stderr)
-        return 1
-    except (OSError, ValueError, TypeError, AttributeError):
-        print("Error: local I/O or malformed API data", file=sys.stderr)
-        return 1
-    except KeyboardInterrupt:
-        print("Interrupted", file=sys.stderr)
-        return 130
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+        self.draft(draft_id)
+        local = [(p, *fingerprint(p)) for p in paths]
+        _, remote = self.draft(draft_id)
+        for p, size, digest in local:
+            for item in remote:
+                if isinstance(item, dict) and item.get("filename") == p.name:
+                    verify(item, size, digest)
+        for p, size, digest in local:
+            self.upload(draft_id, p, size, digest)
