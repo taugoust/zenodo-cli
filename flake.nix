@@ -10,7 +10,10 @@
         pname = project.name;
         inherit (project) version;
         pyproject = true;
-        src = ./.;
+        src = nixpkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = nixpkgs.lib.fileset.unions [ ./pyproject.toml ./README.md ./LICENSE ./src ./tests ];
+        };
         build-system = [ pkgs.python3Packages.setuptools ];
         dependencies = with pkgs.python3Packages; [ requests tqdm ];
         nativeCheckInputs = [ pkgs.python3Packages.unittestCheckHook ];
