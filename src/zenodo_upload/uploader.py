@@ -203,3 +203,61 @@ class Uploader:
         for p, size, digest in local:
             self.upload(draft_id, p, size, digest, replace=replace)
 
+    def new_version(self, record_id):
+        """Return the draft for a new version of a published record, creating it if needed."""
+        record_id = check_id(record_id, "Record ID")
+        # Zenodo returns the existing new-version draft instead of creating a
+        # second one, so retrying after a lost response is safe.
+        data = self.retry(
+            lambda: self.request("POST", f"{self.api}/records/{record_id}/versions"),
+            label="New version",
+        )
+        if not isinstance(data, dict) or data.get("is_published") is not False:
+            raise UploadError("New version is not an unpublished draft")
+        draft_id = check_id(data.get("id"), "New version draft ID")
+        print(f"New version draft: {draft_id}")
+        return draft_id
+
+    def import_files(self, draft_id):
+        """Copy the previous version's files into a draft that has none yet."""
+        def attempt():
+            _, files = self.draft(draft_id)
+            if files:
+                return False
+            self.request("POST", f"{self.api}/records/{draft_id}/draft/actions/files-import")
+            return True
+        imported = self.retry(attempt, label="Import files")
+        _, files = self.draft(draft_id)
+        if imported:
+            print(f"Imported {len(files)} files from the previous version")
+        else:
+            print(f"Draft already has {len(files)} files; not importing")
+
+    def set_version(self, draft_id, version):
+        draft_id = check_id(draft_id, "Draft ID")
+        # Zenodo strips surrounding whitespace, which would look like a mismatch.
+        version = version.strip() if isinstance(version, str) else ""
+        if not version:
+            raise UploadError("Version must be a non-empty string")
+        url = f"{self.api}/records/{draft_id}/draft"
+        def attempt():
+            data = self.request("GET", url)
+            if (not isinstance(data, dict) or not isinstance(data.get("metadata"), dict)
+                    or type(data.get("revision_id")) is not int):
+                raise UploadError("Malformed draft metadata")
+            if data["metadata"].get("version") == version:
+                return
+            data["metadata"]["version"] = version
+            # If-Match makes Zenodo refuse the update if the draft changed since it was read.
+            result = self.request("PUT", url, json=data,
+                                  headers={"If-Match": str(data["revision_id"])})
+            if not isinstance(result, dict) or not isinstance(result.get("metadata"), dict):
+                raise UploadError("Malformed draft update response")
+            # Drafts are saved even when fields fail validation, which drops them.
+            changed = [k for k in ("metadata", "custom_fields", "pids", "access")
+                       if result.get(k) != data.get(k)]
+            if changed:
+                raise UploadError(f"Draft {', '.join(changed)} changed unexpectedly while setting "
+                                  "the version; review the draft before publishing")
+        self.retry(attempt, label="Set version")
+        print(f"Version set to {version}")

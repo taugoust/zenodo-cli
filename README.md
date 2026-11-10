@@ -1,21 +1,20 @@
 # Zenodo draft uploader
 
-Upload large files to an existing Zenodo draft from the terminal. Based on [Pranav Durai's
+Upload large files to a Zenodo draft from the terminal, or prepare a new version of a published
+record. Based on [Pranav Durai's
 script](https://github.com/zenodo/zenodo/issues/2514#issuecomment-4956445997).
 
-The script uploads files one at a time and checks their size and MD5 checksum. It doesn't create
-drafts, change metadata, or publish anything.
+The script uploads files one at a time and checks their size and MD5 checksum. It never publishes
+anything: you review the draft and publish it in Zenodo.
 
 ## Usage
 
-You'll need Nix, an existing draft, and a [Zenodo
-token](https://zenodo.org/account/settings/applications/tokens/new/) with `deposit:write`
-permission. The draft ID is the number in your draft's URL.
-
-Set `ZENODO_TOKEN` in your environment, then pass the draft ID and file paths:
+You'll need Nix and a [Zenodo token](https://zenodo.org/account/settings/applications/tokens/new/)
+with `deposit:write` permission. Set `ZENODO_TOKEN` in your environment, then pass the ID of an
+existing draft (the number in its URL) and the file paths:
 
 ```sh
-nix run . -- 12345678 first.tar.gz second.tar.gz
+nix run . -- upload 12345678 first.tar.gz second.tar.gz
 ```
 
 The token is read only from `ZENODO_TOKEN`, not from a command-line option. To enter it without
@@ -30,8 +29,25 @@ export ZENODO_TOKEN
 Only the files you name are uploaded. Local files are never changed. Each file keeps its filename,
 so you can't upload two files with the same name in one run.
 
-Add `--sandbox` to use [sandbox.zenodo.org](https://sandbox.zenodo.org) instead. It needs a
-separate account and token, and is a safe place to try things out.
+Add `--sandbox` to any command to use [sandbox.zenodo.org](https://sandbox.zenodo.org) instead. It
+needs a separate account and token, and is a safe place to try things out.
+
+## New versions
+
+To add or update files of a published record, create a new version from it:
+
+```sh
+nix run . -- new-version 12345678 missing-part.tar.gz --version 1.1
+```
+
+The ID is that of any published version of the record. This creates a new-version draft and copies
+the previous version's files into it, sets the version metadata if `--version` is given, and
+uploads the named files. It then prints the draft's URL: check the draft there and publish it.
+
+Running the command again resumes the same draft instead of creating another. Files are only
+copied into a draft that has none, and `--no-import` skips copying entirely. Other metadata is left
+as it was, so update it in Zenodo before publishing if needed. You need to own or manage the record,
+and Zenodo doesn't allow new versions of records with an external DOI.
 
 ## Retries and verification
 
@@ -48,7 +64,7 @@ Connection failures, timeouts, HTTP 408/429 responses, and server errors are ret
 attempts per operation by default. Use `--attempts` to change that, including the first try:
 
 ```sh
-nix run . -- --attempts 10 12345678 first.tar.gz second.tar.gz
+nix run . -- upload --attempts 10 12345678 first.tar.gz second.tar.gz
 ```
 
 The limit applies separately to each file upload and each draft API call. `--attempts 1` disables
@@ -70,7 +86,7 @@ the command-line interface in `src/zenodo_upload/cli.py`. Python, `requests`, an
 the pinned Nix environment, which puts `src/` on `PYTHONPATH`.
 
 ```sh
-nix develop . --command python -m zenodo_upload 12345678 first.tar.gz second.tar.gz
+nix develop . --command python -m zenodo_upload upload 12345678 first.tar.gz second.tar.gz
 ```
 
 You can also use it as a library:
@@ -85,7 +101,8 @@ with requests.Session() as session:
 ```
 
 `upload_files` runs the same checks as the command: it validates the inputs and draft ID, and checks
-every file already in the draft before uploading anything. `Uploader(session, api=SANDBOX_API)`
+every file already in the draft before uploading anything. `new_version`, `import_files` and
+`set_version` cover the other steps of `new-version`, and `Uploader(session, api=SANDBOX_API)`
 targets the sandbox.
 
 The package is defined in `pyproject.toml`, so it also installs with `pip install .`, which provides

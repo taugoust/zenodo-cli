@@ -3,10 +3,11 @@ import argparse
 import os
 from pathlib import Path
 import sys
+from urllib.parse import urlsplit
 
 import requests
 
-from .uploader import API, ATTEMPTS, SANDBOX_API, Uploader, UploadError
+from .uploader import API, ATTEMPTS, SANDBOX_API, Uploader, UploadError, check_id, check_paths
 
 
 def positive_integer(value):
@@ -19,17 +20,34 @@ def positive_integer(value):
     return number
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(prog="zenodo-upload", description=__doc__)
-    parser.add_argument("draft_id", help="Existing unpublished Zenodo draft ID")
-    parser.add_argument("files", nargs="+", type=Path)
-    parser.add_argument("--attempts", type=positive_integer, default=ATTEMPTS,
+def parser():
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--attempts", type=positive_integer, default=ATTEMPTS,
                         help="Maximum attempts per operation, including the first (default: 5)")
-    parser.add_argument("--replace", action="store_true",
+    common.add_argument("--replace", action="store_true",
                         help="Replace draft files whose size or checksum differ from the local file")
-    parser.add_argument("--sandbox", action="store_true",
+    common.add_argument("--sandbox", action="store_true",
                         help="Use sandbox.zenodo.org instead of zenodo.org")
-    args = parser.parse_args(argv)
+    result = argparse.ArgumentParser(prog="zenodo-upload", description=__doc__)
+    commands = result.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    upload = commands.add_parser("upload", parents=[common],
+                                 help="Upload files to an existing unpublished draft")
+    upload.add_argument("draft_id", help="Existing unpublished Zenodo draft ID")
+    upload.add_argument("files", nargs="+", type=Path)
+    new_version = commands.add_parser(
+        "new-version", parents=[common],
+        help="Create or resume a new-version draft of a published record and upload files to it")
+    new_version.add_argument("record_id", help="ID of a published version of the record")
+    new_version.add_argument("files", nargs="*", type=Path)
+    new_version.add_argument("--version", dest="version_label", metavar="VERSION",
+                             help="Set the draft's version metadata, e.g. 1.1")
+    new_version.add_argument("--no-import", dest="import_files", action="store_false",
+                             help="Don't copy the previous version's files into an empty draft")
+    return result
+
+
+def main(argv=None):
+    args = parser().parse_args(argv)
     token = os.environ.get("ZENODO_TOKEN")
     if not token:
         print("ZENODO_TOKEN must be set", file=sys.stderr)
@@ -39,7 +57,21 @@ def main(argv=None):
         with requests.Session() as session:
             session.headers["Authorization"] = f"Bearer {token}"
             uploader = Uploader(session, attempts=args.attempts, api=api)
-            uploader.upload_files(args.draft_id, args.files, replace=args.replace)
+            if args.command == "upload":
+                draft_id = args.draft_id
+            else:
+                # Validate everything local before creating anything remotely.
+                check_id(args.record_id, "Record ID")
+                check_paths(args.files)
+                draft_id = uploader.new_version(args.record_id)
+                if args.import_files:
+                    uploader.import_files(draft_id)
+                if args.version_label is not None:
+                    uploader.set_version(draft_id, args.version_label)
+            if args.files:
+                uploader.upload_files(draft_id, args.files, replace=args.replace)
+            if args.command == "new-version":
+                print(f"Draft ready for review; publish it at https://{urlsplit(api).netloc}/uploads/{draft_id}")
     except UploadError as error:
         print(f"Error: {error}".replace(token, "[REDACTED]"), file=sys.stderr)
         return 1

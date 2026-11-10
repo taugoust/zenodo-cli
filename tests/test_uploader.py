@@ -178,13 +178,13 @@ class Tests(unittest.TestCase):
                 with patch.dict(os.environ, {"ZENODO_TOKEN": "test"}), contextlib.redirect_stderr(output), \
                      patch.object(cli.requests, "Session") as session:
                     session.return_value.__enter__.return_value = self.session
-                    self.assertEqual(cli.main(["123", *map(str, paths)]), 1)
+                    self.assertEqual(cli.main(["upload", "123", *map(str, paths)]), 1)
                 self.assertIn(reason, output.getvalue())
         output = io.StringIO()
         with patch.dict(os.environ, {"ZENODO_TOKEN": "test"}), contextlib.redirect_stderr(output), \
              patch.object(cli.requests, "Session") as session:
             session.return_value.__enter__.return_value = self.session
-            self.assertEqual(cli.main(["../x", str(self.path)]), 1)
+            self.assertEqual(cli.main(["upload", "../x", str(self.path)]), 1)
         self.assertIn("Draft ID must be a positive integer", output.getvalue())
         self.session.request.assert_not_called()
 
@@ -275,7 +275,7 @@ class Tests(unittest.TestCase):
         with patch.dict(os.environ, {"ZENODO_TOKEN": "sensitive-token"}), contextlib.redirect_stderr(output), \
              patch.object(cli.requests, "Session") as session:
             session.return_value.__enter__.return_value = self.session
-            self.assertEqual(cli.main(["--attempts", "2", "123", str(self.path)]), 1)
+            self.assertEqual(cli.main(["upload", "--attempts", "2", "123", str(self.path)]), 1)
         self.assertEqual(self.session.headers, {"Authorization": "Bearer sensitive-token"})
         self.assertEqual(self.session.request.call_count, 2)
         log = output.getvalue()
@@ -285,13 +285,13 @@ class Tests(unittest.TestCase):
 
     def test_cli_failure_and_secret_redaction(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(cli.requests, "Session") as session:
-            self.assertEqual(cli.main(["123", str(self.path)]), 1)
+            self.assertEqual(cli.main(["upload", "123", str(self.path)]), 1)
             session.assert_not_called()
         output = io.StringIO()
         with patch.dict(os.environ, {"ZENODO_TOKEN": "sensitive-token"}), \
              patch.object(z.Uploader, "draft", side_effect=z.UploadError("sensitive-token")), \
              contextlib.redirect_stderr(output):
-            self.assertEqual(cli.main(["123", str(self.path)]), 1)
+            self.assertEqual(cli.main(["upload", "123", str(self.path)]), 1)
         self.assertNotIn("sensitive-token", output.getvalue())
 
     def test_custom_attempts(self):
@@ -317,9 +317,9 @@ class Tests(unittest.TestCase):
         with patch.dict(os.environ, {"ZENODO_TOKEN": "test"}), \
              patch.object(cli, "Uploader") as uploader:
             uploader.return_value.draft.return_value = ("bucket", [])
-            self.assertEqual(cli.main(["--attempts", "10", "123", str(self.path)]), 0)
+            self.assertEqual(cli.main(["upload", "--attempts", "10", "123", str(self.path)]), 0)
             self.assertEqual(uploader.call_args.kwargs["attempts"], 10)
-            self.assertEqual(cli.main(["123", str(self.path)]), 0)
+            self.assertEqual(cli.main(["upload", "123", str(self.path)]), 0)
             self.assertEqual(uploader.call_args.kwargs["attempts"], 5)
 
     def test_invalid_attempts(self):
@@ -327,7 +327,7 @@ class Tests(unittest.TestCase):
             with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()), \
                  patch.object(cli.requests, "Session") as session, \
                  self.assertRaises(SystemExit) as error:
-                cli.main(["--attempts", value, "123", str(self.path)])
+                cli.main(["upload", "--attempts", value, "123", str(self.path)])
             self.assertEqual(error.exception.code, 2)
             session.assert_not_called()
 
@@ -362,7 +362,7 @@ class Tests(unittest.TestCase):
                 else:
                     self.session.request.return_value = response(503)
                     self.sleep.side_effect = KeyboardInterrupt
-                status, log = self.run_cli("123", str(self.path))
+                status, log = self.run_cli("upload", "123", str(self.path))
                 self.assertEqual(status, 130)
                 self.assertEqual(log.splitlines()[-1], "Interrupted")
                 self.assertEqual(self.session.request.call_count, 1)
@@ -370,14 +370,14 @@ class Tests(unittest.TestCase):
     def test_cli_local_io_and_malformed_api_errors_generic(self):
         generic = "Error: local I/O or malformed API data\n"
         with patch.object(z, "fingerprint", side_effect=PermissionError(13, "denied", "/secret/path")):
-            status, log = self.run_cli("123", str(self.path))
+            status, log = self.run_cli("upload", "123", str(self.path))
         self.assertEqual((status, log), (1, generic))
         self.session.request.return_value = response(body=["not", "a", "draft"])
-        status, log = self.run_cli("123", str(self.path))
+        status, log = self.run_cli("upload", "123", str(self.path))
         self.assertEqual((status, log), (1, "Error: Not a confirmed unpublished draft\n"))
         self.session.request.return_value = response(body={**DRAFT, "files": [{"filename": self.path.name, **META}]})
         with patch.object(z, "verify", side_effect=TypeError("secret")):
-            status, log = self.run_cli("123", str(self.path))
+            status, log = self.run_cli("upload", "123", str(self.path))
         self.assertEqual(status, 1)
         self.assertTrue(log.endswith(generic))
         self.assertNotIn("secret", log)
@@ -388,7 +388,7 @@ class Tests(unittest.TestCase):
         with patch.dict(os.environ, {"ZENODO_TOKEN": "test"}), \
              patch.object(z.Uploader, "draft", return_value=(DRAFT["links"]["bucket"], [])), \
              patch.object(z.Uploader, "upload") as upload:
-            self.assertEqual(cli.main(["123", str(self.path), str(other)]), 0)
+            self.assertEqual(cli.main(["upload", "123", str(self.path), str(other)]), 0)
             self.assertEqual([c.args[1] for c in upload.call_args_list], [self.path, other])
 
 
@@ -398,7 +398,13 @@ class FakeZenodo:
     def __init__(self, test, api="https://zenodo.org/api"):
         self.test, self.api = test, api
         self.bucket = api.replace("/api", "/api/files") + "/bucket456"
+        self.previous = [{"filename": "old.tar.gz", "filesize": 3, "checksum": "a" * 32}]
         self.files = []
+        self.rdm = {"id": "456", "revision_id": 3, "is_published": False,
+                    "links": {"self": f"{api}/records/456/draft"},
+                    "metadata": {"title": "Data", "version": "1.0", "creators": [{"name": "A"}]},
+                    "custom_fields": {"code:repo": "x"}, "access": {"record": "public"},
+                    "pids": {"doi": {"identifier": "10.5281/zenodo.456", "provider": "datacite"}}}
         self.calls = []
         self.fail = {}  # (method, path) -> list of outcomes to apply before handling
 
@@ -420,9 +426,25 @@ class FakeZenodo:
         return self.handle(method, path, kwargs)
 
     def handle(self, method, path, kwargs):
+        if (method, path) == ("POST", "/records/123/versions"):
+            return response(201, copy.deepcopy(self.rdm))
         if (method, path) == ("GET", "/deposit/depositions/456"):
             return response(body={"submitted": False, "links": {"bucket": self.bucket},
                                   "files": copy.deepcopy(self.files)})
+        if (method, path) == ("POST", "/records/456/draft/actions/files-import"):
+            if self.files:
+                return response(400, {"message": "Please remove all files first."})
+            self.files = copy.deepcopy(self.previous)
+            return response(201, {"entries": []})
+        if (method, path) == ("GET", "/records/456/draft"):
+            return response(body=copy.deepcopy(self.rdm))
+        if (method, path) == ("PUT", "/records/456/draft"):
+            if kwargs["headers"]["If-Match"] != str(self.rdm["revision_id"]):
+                return response(412)
+            body = kwargs["json"]
+            self.rdm = {**self.rdm, "metadata": body["metadata"],
+                        "revision_id": self.rdm["revision_id"] + 1}
+            return response(body=copy.deepcopy(self.rdm))
         if method == "PUT" and path.startswith("/files/bucket456/"):
             name = requests.utils.unquote(path.rsplit("/", 1)[1])
             body = kwargs["data"].read()
@@ -492,7 +514,7 @@ class ReplaceAndSandboxTests(FakeZenodoTests):
     def test_sandbox(self):
         self.zenodo = FakeZenodo(self, api="https://sandbox.zenodo.org/api")
         self.session.request.side_effect = self.zenodo
-        status, log = self.run_cli("--sandbox", "456", str(self.path))
+        status, log = self.run_cli("upload", "--sandbox", "456", str(self.path))
         self.assertEqual(status, 0, log)
         self.assertEqual([c[0] for c in self.zenodo.calls if c[0] != "GET"], ["PUT"])
         # A production uploader must not trust a sandbox bucket, and vice versa.
@@ -504,6 +526,136 @@ class ReplaceAndSandboxTests(FakeZenodoTests):
                 with self.assertRaisesRegex(z.UploadError, "Untrusted bucket URL"):
                     z.Uploader(session, api=api).draft("456")
                 self.assertTrue(session.request.call_args.args[1].startswith(api + "/"))
+
+
+class NewVersionTests(FakeZenodoTests):
+    def test_full_flow_order(self):
+        status, log = self.run_cli("new-version", "123", str(self.path), "--version", "1.1")
+        self.assertEqual(status, 0, log)
+        mutations = [c for c in self.zenodo.calls if c[0] != "GET"]
+        self.assertEqual(mutations, [("POST", "/records/123/versions"),
+                                     ("POST", "/records/456/draft/actions/files-import"),
+                                     ("PUT", "/records/456/draft"),
+                                     ("PUT", "/files/bucket456/missing.tar.gz")])
+        self.assertEqual([f["filename"] for f in self.zenodo.files], ["old.tar.gz", "missing.tar.gz"])
+        self.assertEqual(self.zenodo.rdm["metadata"]["version"], "1.1")
+        self.assertIn("https://zenodo.org/uploads/456", log)
+
+    def test_rerun_resumes_without_duplicating(self):
+        self.assertEqual(self.run_cli("new-version", "123", str(self.path), "--version", "1.1")[0], 0)
+        self.zenodo.calls.clear()
+        status, log = self.run_cli("new-version", "123", str(self.path), "--version", "1.1")
+        self.assertEqual(status, 0, log)
+        self.assertEqual([c for c in self.zenodo.calls if c[0] != "GET"],
+                         [("POST", "/records/123/versions")])
+        self.assertIn("not importing", log)
+        self.assertIn("Verified; skipping missing.tar.gz", log)
+
+    def test_no_import_and_no_files(self):
+        status, log = self.run_cli("new-version", "123", "--no-import")
+        self.assertEqual(status, 0, log)
+        self.assertEqual([c for c in self.zenodo.calls if c[0] != "GET"],
+                         [("POST", "/records/123/versions")])
+        self.assertEqual(self.zenodo.files, [])
+
+    def test_sandbox_draft_url(self):
+        self.zenodo = FakeZenodo(self, api="https://sandbox.zenodo.org/api")
+        self.session.request.side_effect = self.zenodo
+        status, log = self.run_cli("new-version", "--sandbox", "123", str(self.path))
+        self.assertEqual(status, 0, log)
+        self.assertIn("https://sandbox.zenodo.org/uploads/456", log)
+
+    def test_local_inputs_checked_before_creating_version(self):
+        for argv, reason in ((["new-version", "123", str(self.path), str(self.path)], "Duplicate"),
+                             (["new-version", "123", self.tmp.name], "regular files"),
+                             (["new-version", "12/3", str(self.path)], "Record ID must be a positive")):
+            with self.subTest(argv=argv):
+                status, log = self.run_cli(*argv)
+                self.assertEqual(status, 1)
+                self.assertIn(reason, log)
+        self.assertEqual(self.zenodo.calls, [])
+
+    def test_new_version_response_validated(self):
+        for body, reason in (({**self.zenodo.rdm, "is_published": True}, "not an unpublished draft"),
+                             ({"id": "456"}, "not an unpublished draft"), (["456"], "not an unpublished"),
+                             ({"is_published": False, "id": "4/56"}, "draft ID must be a positive"),
+                             ({"is_published": False}, "draft ID must be a positive")):
+            with self.subTest(body=body):
+                self.zenodo.fail[("POST", "/records/123/versions")] = [response(201, body)]
+                with self.assertRaisesRegex(z.UploadError, reason):
+                    self.uploader.new_version("123")
+
+    def test_new_version_retried(self):
+        self.zenodo.fail[("POST", "/records/123/versions")] = ["lost", response(503)]
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.uploader.new_version("123"), "456")
+        self.assertIn("New version: transient failure; retry 3/5", output.getvalue())
+
+    def test_new_version_refused(self):
+        self.zenodo.fail[("POST", "/records/123/versions")] = [response(403)]
+        with self.assertRaisesRegex(z.UploadError, "HTTP 403; request refused"):
+            self.uploader.new_version("123")
+        self.sleep.assert_not_called()
+
+    def test_import_lost_response_not_repeated(self):
+        self.zenodo.fail[("POST", "/records/456/draft/actions/files-import")] = ["lost"]
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            self.uploader.import_files("456")
+        imports = [c for c in self.zenodo.calls if c[1].endswith("files-import")]
+        self.assertEqual(len(imports), 1)
+        self.assertEqual(self.zenodo.files, self.zenodo.previous)
+
+    def test_set_version_uses_if_match_and_keeps_other_fields(self):
+        before = copy.deepcopy(self.zenodo.rdm)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.uploader.set_version("456", "  1.1 ")
+        put = next(c for c in self.session.request.call_args_list if c.args[0] == "PUT")
+        self.assertEqual(put.kwargs["headers"]["If-Match"], "3")
+        self.assertEqual(self.zenodo.rdm["metadata"], {**before["metadata"], "version": "1.1"})
+        for key in ("custom_fields", "pids", "access"):
+            self.assertEqual(put.kwargs["json"][key], before[key])
+
+    def test_set_version_already_set_skips_put(self):
+        self.zenodo.rdm["metadata"]["version"] = "1.1"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.uploader.set_version("456", "1.1")
+        self.assertNotIn("PUT", [c[0] for c in self.zenodo.calls])
+
+    def test_set_version_lost_response_reconciled(self):
+        self.zenodo.fail[("PUT", "/records/456/draft")] = ["lost"]
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            self.uploader.set_version("456", "1.1")
+        self.assertEqual([c[0] for c in self.zenodo.calls], ["GET", "PUT", "GET"])
+        self.assertEqual(self.zenodo.rdm["revision_id"], 4)
+
+    def test_set_version_concurrent_edit_refused(self):
+        self.zenodo.fail[("PUT", "/records/456/draft")] = [response(412)]
+        with self.assertRaisesRegex(z.UploadError, "HTTP 412; request refused"):
+            self.uploader.set_version("456", "1.1")
+        self.sleep.assert_not_called()
+
+    def test_set_version_detects_dropped_fields(self):
+        for key in ("metadata", "custom_fields", "pids", "access"):
+            with self.subTest(key=key):
+                dropped = {**self.zenodo.rdm, "metadata": {**self.zenodo.rdm["metadata"], "version": "1.1"}}
+                dropped[key] = {"version": "1.1"} if key == "metadata" else {}
+                self.zenodo.fail[("PUT", "/records/456/draft")] = [response(body=dropped)]
+                with self.assertRaisesRegex(z.UploadError, f"Draft {key} changed unexpectedly"):
+                    self.uploader.set_version("456", "1.1")
+
+    def test_set_version_rejects_bad_input_and_responses(self):
+        for version in ("", "   ", None):
+            with self.subTest(version=version), \
+                 self.assertRaisesRegex(z.UploadError, "non-empty string"):
+                self.uploader.set_version("456", version)
+        self.assertEqual(self.zenodo.calls, [])
+        for body in ({"metadata": {}}, {"revision_id": 1}, {"metadata": [], "revision_id": 1},
+                     {"metadata": {}, "revision_id": "1"}):
+            with self.subTest(body=body):
+                self.zenodo.fail[("GET", "/records/456/draft")] = [response(body=body)]
+                with self.assertRaisesRegex(z.UploadError, "Malformed draft metadata"):
+                    self.uploader.set_version("456", "1.1")
 
 
 if __name__ == "__main__":
