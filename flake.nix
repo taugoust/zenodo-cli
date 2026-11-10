@@ -5,9 +5,10 @@
     let
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
       each = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      project = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project;
       package = pkgs: pkgs.python3Packages.buildPythonApplication {
-        pname = "zenodo-uploader";
-        version = "0.1.0";
+        pname = project.name;
+        inherit (project) version;
         pyproject = true;
         src = ./.;
         build-system = [ pkgs.python3Packages.setuptools ];
