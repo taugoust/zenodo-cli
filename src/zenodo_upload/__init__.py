@@ -1,5 +1,7 @@
 """Sequential, verified uploads to existing Zenodo drafts."""
 from .cli import main
-from .uploader import TransientError, Uploader, UploadError, fingerprint, verify
+from .uploader import (API, SANDBOX_API, ConflictError, TransientError, Uploader, UploadError,
+                       fingerprint, verify)
 
-__all__ = ["TransientError", "Uploader", "UploadError", "fingerprint", "main", "verify"]
+__all__ = ["API", "SANDBOX_API", "ConflictError", "TransientError", "Uploader", "UploadError",
+           "fingerprint", "main", "verify"]

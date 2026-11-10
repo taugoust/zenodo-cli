@@ -30,14 +30,19 @@ export ZENODO_TOKEN
 Only the files you name are uploaded. Local files are never changed. Each file keeps its filename,
 so you can't upload two files with the same name in one run.
 
+Add `--sandbox` to use [sandbox.zenodo.org](https://sandbox.zenodo.org) instead. It needs a
+separate account and token, and is a safe place to try things out.
+
 ## Retries and verification
 
 Progress is shown while hashing and uploading. An upload counts as successful only when Zenodo
 returns a matching size and MD5 checksum. Missing verification data is an error.
 
 Files already in the draft are checked before being skipped. If a file doesn't match, the script
-stops instead of replacing it. Don't edit the local files or upload to the same draft from another
-process while it's running.
+stops before uploading anything, unless you pass `--replace` to upload over it. Zenodo only swaps in
+a replacement once it has been fully received, so an interrupted one keeps the previous file. Don't
+edit the local files, or change the same draft from another process or in the browser, while it's
+running.
 
 Connection failures, timeouts, HTTP 408/429 responses, and server errors are retried up to five
 attempts per operation by default. Use `--attempts` to change that, including the first try:
@@ -46,7 +51,7 @@ attempts per operation by default. Use `--attempts` to change that, including th
 nix run . -- --attempts 10 12345678 first.tar.gz second.tar.gz
 ```
 
-The limit applies separately to each file upload and each draft API check. `--attempts 1` disables
+The limit applies separately to each file upload and each draft API call. `--attempts 1` disables
 retries. Delays start at 10 seconds, then 20 and 40, and stay at 60 seconds for further retries.
 Connection and read timeouts are 60 seconds and two hours respectively, not a limit on the total
 upload time.
@@ -80,7 +85,8 @@ with requests.Session() as session:
 ```
 
 `upload_files` runs the same checks as the command: it validates the inputs and draft ID, and checks
-every file already in the draft before uploading anything.
+every file already in the draft before uploading anything. `Uploader(session, api=SANDBOX_API)`
+targets the sandbox.
 
 The package is defined in `pyproject.toml`, so it also installs with `pip install .`, which provides
 the `zenodo-upload` command.

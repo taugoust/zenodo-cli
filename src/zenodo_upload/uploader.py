@@ -10,6 +10,7 @@ import requests
 from tqdm import tqdm
 
 API = "https://zenodo.org/api"
+SANDBOX_API = "https://sandbox.zenodo.org/api"
 TIMEOUT = (60, 7200)  # connect and socket read timeouts, not a total deadline
 ATTEMPTS = 5
 CHUNK = 8 * 1024 * 1024
@@ -23,6 +24,27 @@ class TransientError(UploadError):
     pass
 
 
+class ConflictError(UploadError):
+    pass
+
+
+def check_id(value, label):
+    # IDs are interpolated into API paths, so reject anything but digits.
+    value = str(value)
+    if not re.fullmatch(r"[1-9][0-9]*", value):
+        raise UploadError(f"{label} must be a positive integer")
+    return value
+
+
+def check_paths(paths):
+    paths = [Path(p) for p in paths]
+    if len({p.name for p in paths}) != len(paths):
+        raise UploadError("Duplicate input basenames")
+    if any(not p.is_file() for p in paths):
+        raise UploadError("All inputs must be readable regular files")
+    return paths
+
+
 def verify(metadata, size, digest):
     if not isinstance(metadata, dict):
         raise UploadError("Missing file verification metadata")
@@ -34,7 +56,7 @@ def verify(metadata, size, digest):
     if not re.fullmatch(r"[0-9a-f]{32}", checksum):
         raise UploadError("Missing or malformed MD5 checksum")
     if remote_size != size or checksum != digest:
-        raise UploadError("Conflicting file: size or MD5 mismatch; refusing replacement")
+        raise ConflictError("Conflicting file: size or MD5 mismatch; refusing replacement")
 
 
 def fingerprint(path):
@@ -67,9 +89,11 @@ class ProgressReader:
 
 
 class Uploader:
-    def __init__(self, session, attempts=ATTEMPTS):
+    def __init__(self, session, attempts=ATTEMPTS, api=API):
         self.session = session
         self.attempts = attempts
+        self.api = api.rstrip("/")
+        self.host = urlsplit(self.api).netloc
 
     def request(self, method, url, **kwargs):
         try:
@@ -104,11 +128,9 @@ class Uploader:
                 time.sleep(delay)
 
     def draft(self, draft_id):
-        # The ID is interpolated into the API path, so reject anything but digits.
-        if not re.fullmatch(r"[1-9][0-9]*", str(draft_id)):
-            raise UploadError("Draft ID must be a positive integer")
+        draft_id = check_id(draft_id, "Draft ID")
         data = self.retry(
-            lambda: self.request("GET", f"{API}/deposit/depositions/{draft_id}"),
+            lambda: self.request("GET", f"{self.api}/deposit/depositions/{draft_id}"),
             label="Draft API check",
         )
         if not isinstance(data, dict) or data.get("submitted") is not False:
@@ -118,7 +140,7 @@ class Uploader:
         if not isinstance(bucket, str):
             raise UploadError("Missing bucket URL")
         parsed = urlsplit(bucket)
-        if (parsed.scheme != "https" or parsed.netloc != "zenodo.org"
+        if (parsed.scheme != "https" or parsed.netloc != self.host
                 or not parsed.path.startswith("/api/files/") or parsed.query or parsed.fragment):
             raise UploadError("Untrusted bucket URL")
         files = data.get("files")
@@ -129,25 +151,34 @@ class Uploader:
             raise UploadError("Malformed draft file listing")
         return bucket.rstrip("/"), files
 
-    def upload(self, draft_id, path, size, digest):
+    def upload(self, draft_id, path, size, digest, replace=False):
         def attempt():
             # Reconcile ambiguous previous PUT outcomes before retrying. Never
-            # overwrite a visible conflicting or incompletely verified object.
+            # overwrite an incompletely verified object, or a conflicting one
+            # unless replacement was requested.
             bucket, files = self.draft(draft_id)
             matches = [f for f in files if isinstance(f, dict) and f.get("filename") == path.name]
             if len(matches) > 1:
                 raise UploadError("Ambiguous remote filename")
+            headers = {"Content-Type": "application/octet-stream", "Content-Length": str(size)}
             if matches:
-                verify(matches[0], size, digest)
-                print(f"Verified; skipping {path.name}")
-                return
+                try:
+                    verify(matches[0], size, digest)
+                    print(f"Verified; skipping {path.name}")
+                    return
+                except ConflictError:
+                    if not replace:
+                        raise
+                print(f"Replacing conflicting {path.name}")
+            else:
+                headers["If-None-Match"] = "*"
             with path.open("rb") as source, tqdm(total=size, desc=path.name,
                                                  unit="B", unit_scale=True) as progress:
                 reader = ProgressReader(source, size, progress)
+                # Zenodo stores the whole body before swapping it in, so an
+                # interrupted replacement leaves the previous file intact.
                 result = self.request("PUT", f"{bucket}/{quote(path.name, safe='')}",
-                                      data=reader, headers={"Content-Type": "application/octet-stream",
-                                                            "Content-Length": str(size),
-                                                            "If-None-Match": "*"})
+                                      data=reader, headers=headers)
                 if reader.count != size or reader.digest.hexdigest() != digest:
                     raise UploadError("Local file changed during upload")
             verify(result, size, digest)
@@ -155,19 +186,20 @@ class Uploader:
         self.retry(attempt, label=f"Upload {path.name}")
 
 
-    def upload_files(self, draft_id, paths):
+    def upload_files(self, draft_id, paths, replace=False):
         """Upload files sequentially, checking every existing target before changing anything."""
-        paths = [Path(p) for p in paths]
-        if len({p.name for p in paths}) != len(paths):
-            raise UploadError("Duplicate input basenames")
-        if any(not p.is_file() for p in paths):
-            raise UploadError("All inputs must be readable regular files")
+        paths = check_paths(paths)
         self.draft(draft_id)
         local = [(p, *fingerprint(p)) for p in paths]
         _, remote = self.draft(draft_id)
         for p, size, digest in local:
             for item in remote:
                 if isinstance(item, dict) and item.get("filename") == p.name:
-                    verify(item, size, digest)
+                    try:
+                        verify(item, size, digest)
+                    except ConflictError:
+                        if not replace:
+                            raise
         for p, size, digest in local:
-            self.upload(draft_id, p, size, digest)
+            self.upload(draft_id, p, size, digest, replace=replace)
+

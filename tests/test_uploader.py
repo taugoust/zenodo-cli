@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import hashlib
 import io
 import os
@@ -389,6 +390,120 @@ class Tests(unittest.TestCase):
              patch.object(z.Uploader, "upload") as upload:
             self.assertEqual(cli.main(["123", str(self.path), str(other)]), 0)
             self.assertEqual([c.args[1] for c in upload.call_args_list], [self.path, other])
+
+
+class FakeZenodo:
+    """Stateful stand-in for the Zenodo draft, record and bucket endpoints."""
+
+    def __init__(self, test, api="https://zenodo.org/api"):
+        self.test, self.api = test, api
+        self.bucket = api.replace("/api", "/api/files") + "/bucket456"
+        self.files = []
+        self.calls = []
+        self.fail = {}  # (method, path) -> list of outcomes to apply before handling
+
+    def __call__(self, method, url, **kwargs):
+        self.test.assertTrue(url.startswith(self.api + "/"), url)
+        self.test.assertFalse(kwargs["allow_redirects"])
+        path = url[len(self.api):]
+        self.calls.append((method, path))
+        outcomes = self.fail.get((method, path))
+        if outcomes:
+            outcome = outcomes.pop(0)
+            if outcome == "lost":
+                # The server applies the request, but the response never arrives.
+                self.handle(method, path, kwargs)
+                raise requests.Timeout("lost")
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        return self.handle(method, path, kwargs)
+
+    def handle(self, method, path, kwargs):
+        if (method, path) == ("GET", "/deposit/depositions/456"):
+            return response(body={"submitted": False, "links": {"bucket": self.bucket},
+                                  "files": copy.deepcopy(self.files)})
+        if method == "PUT" and path.startswith("/files/bucket456/"):
+            name = requests.utils.unquote(path.rsplit("/", 1)[1])
+            body = kwargs["data"].read()
+            self.files = [f for f in self.files if f["filename"] != name]
+            entry = {"filename": name, "filesize": len(body), "checksum": hashlib.md5(body).hexdigest()}
+            self.files.append(entry)
+            return response(201, {"size": len(body), "checksum": "md5:" + entry["checksum"]})
+        raise AssertionError(f"unexpected request {method} {path}")
+
+
+class FakeZenodoTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "missing.tar.gz"
+        self.path.write_bytes(PAYLOAD)
+        self.zenodo = FakeZenodo(self)
+        self.session = Mock(headers={})
+        self.session.request.side_effect = self.zenodo
+        self.uploader = z.Uploader(self.session)
+        self.sleep = patch.object(z.time, "sleep").start()
+        self.addCleanup(patch.stopall)
+
+    def run_cli(self, *argv):
+        output = io.StringIO()
+        with patch.dict(os.environ, {"ZENODO_TOKEN": "test"}), contextlib.redirect_stderr(output), \
+             contextlib.redirect_stdout(output), patch.object(cli.requests, "Session") as session:
+            session.return_value.__enter__.return_value = self.session
+            status = cli.main([*argv])
+        return status, output.getvalue()
+
+
+class ReplaceAndSandboxTests(FakeZenodoTests):
+    def test_replace_conflicting_file(self):
+        self.zenodo.files = [{"filename": self.path.name, "filesize": 3, "checksum": "b" * 32}]
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(z.ConflictError):
+            self.uploader.upload_files("456", [self.path])
+        self.assertNotIn("PUT", [c[0] for c in self.zenodo.calls])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.uploader.upload_files("456", [self.path], replace=True)
+        self.assertIn(f"Replacing conflicting {self.path.name}", output.getvalue())
+        put = next(c for c in self.session.request.call_args_list if c.args[0] == "PUT")
+        self.assertNotIn("If-None-Match", put.kwargs["headers"])
+        self.assertEqual(self.zenodo.files, [{"filename": self.path.name, "filesize": len(PAYLOAD),
+                                              "checksum": MD5}])
+
+    def test_replace_keeps_matching_and_refuses_malformed(self):
+        self.zenodo.files = [{"filename": self.path.name, "filesize": len(PAYLOAD), "checksum": MD5}]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.uploader.upload_files("456", [self.path], replace=True)
+        self.assertNotIn("PUT", [c[0] for c in self.zenodo.calls])
+        self.zenodo.files = [{"filename": self.path.name, "filesize": len(PAYLOAD)}]
+        with contextlib.redirect_stdout(io.StringIO()), \
+             self.assertRaisesRegex(z.UploadError, "Missing or malformed size/checksum"):
+            self.uploader.upload_files("456", [self.path], replace=True)
+        self.assertNotIn("PUT", [c[0] for c in self.zenodo.calls])
+
+    def test_replace_lost_response_reconciled(self):
+        self.zenodo.files = [{"filename": self.path.name, "filesize": 3, "checksum": "b" * 32}]
+        self.zenodo.fail[("PUT", f"/files/bucket456/{self.path.name}")] = ["lost"]
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            self.uploader.upload_files("456", [self.path], replace=True)
+        self.assertEqual([c for c in self.zenodo.calls if c[0] == "PUT"],
+                         [("PUT", f"/files/bucket456/{self.path.name}")])
+
+    def test_sandbox(self):
+        self.zenodo = FakeZenodo(self, api="https://sandbox.zenodo.org/api")
+        self.session.request.side_effect = self.zenodo
+        status, log = self.run_cli("--sandbox", "456", str(self.path))
+        self.assertEqual(status, 0, log)
+        self.assertEqual([c[0] for c in self.zenodo.calls if c[0] != "GET"], ["PUT"])
+        # A production uploader must not trust a sandbox bucket, and vice versa.
+        session = Mock()
+        for api, bucket in ((z.API, "https://sandbox.zenodo.org/api/files/b"),
+                            (z.SANDBOX_API, "https://zenodo.org/api/files/b")):
+            with self.subTest(api=api):
+                session.request.return_value = response(body={**DRAFT, "links": {"bucket": bucket}})
+                with self.assertRaisesRegex(z.UploadError, "Untrusted bucket URL"):
+                    z.Uploader(session, api=api).draft("456")
+                self.assertTrue(session.request.call_args.args[1].startswith(api + "/"))
 
 
 if __name__ == "__main__":
